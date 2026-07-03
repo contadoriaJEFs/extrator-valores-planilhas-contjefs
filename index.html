@@ -81,10 +81,12 @@
             width: 100%; border-collapse: collapse; margin-top: 10px;
             border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
             font-size: 0.82rem;
+            white-space: nowrap;
         }
         .data-table th {
             background: #667eea; color: white; padding: 10px 10px;
             text-align: left; font-weight: 600; position: sticky; top: 0;
+            z-index: 10;
         }
         .data-table td { padding: 7px 10px; border-bottom: 1px solid #e5e7eb; }
         .data-table tr:nth-child(even) { background: #f8fafc; }
@@ -103,7 +105,7 @@
         .radio-item input { accent-color: #667eea; width: 16px; height: 16px; }
         .radio-label { font-weight: 500; color: #374151; font-size: 0.9rem; }
         .radio-desc { font-size: 0.78rem; color: #6b7280; margin-left: 26px; margin-top: 2px; }
-        .multiselect { border: 2px solid #e5e7eb; border-radius: 8px; padding: 10px; max-height: 180px; overflow-y: auto; }
+        .multiselect { border: 2px solid #e5e7eb; border-radius: 8px; padding: 10px; max-height: 220px; overflow-y: auto; }
         .checkbox-item { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px; cursor: pointer; transition: background 0.2s; }
         .checkbox-item:hover { background: #f3f4f6; }
         .checkbox-item input { accent-color: #667eea; width: 16px; height: 16px; }
@@ -119,7 +121,7 @@
         .expander-icon { transition: transform 0.3s; font-size: 0.8rem; }
         .expander-header.open .expander-icon { transform: rotate(180deg); }
         .code-block { background: #1e293b; color: #e2e8f0; padding: 14px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 0.78rem; overflow-x: auto; margin: 10px 0; }
-        .table-scroll { max-height: 450px; overflow-y: auto; border-radius: 8px; border: 1px solid #e5e7eb; }
+        .table-scroll { max-height: 450px; overflow-x: auto; overflow-y: auto; border-radius: 8px; border: 1px solid #e5e7eb; }
         .status { font-size: 0.85rem; color: #6b7280; margin-top: 8px; }
         .debug-box {
             background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 6px;
@@ -143,8 +145,8 @@
     <div class="container">
         <!-- HEADER -->
         <div class="card">
-            <h1>📊 Leitor de Planilhas RMI - INSS</h1>
-            <p class="subtitle">Funciona com qualquer PDF de RMI no formato padrão de colunas (Competência + Salário-de-Contribuição)</p>
+            <h1>📊 Leitor de Planilhas RMI - Dinâmico</h1>
+            <p class="subtitle">Extrai múltiplas colunas de PDFs e permite selecionar quais exportar.</p>
 
             <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
                 <div class="upload-icon">📄</div>
@@ -182,12 +184,14 @@
                 <div class="metric-card"><div class="metric-label">Total de Registros</div><div class="metric-value" id="totalRecords">-</div></div>
                 <div class="metric-card"><div class="metric-label">Período Inicial</div><div class="metric-value" id="periodStart">-</div></div>
                 <div class="metric-card"><div class="metric-label">Período Final</div><div class="metric-value" id="periodEnd">-</div></div>
-                <div class="metric-card"><div class="metric-label">Maior Salário</div><div class="metric-value" id="maxSalary">-</div></div>
+                <div class="metric-card"><div class="metric-label">Colunas Detetadas</div><div class="metric-value" id="maxColsDetect">-</div></div>
             </div>
             <input type="text" class="search-box" id="searchBox" placeholder="🔍 Buscar por competência, ano ou valor..." onkeyup="filterTable()">
             <div class="table-scroll">
                 <table class="data-table" id="dataTable">
-                    <thead><tr><th>Competência Original</th><th>Data</th><th>Ano-Mês</th><th style="text-align:right">Salário de Contribuição</th></tr></thead>
+                    <thead id="tableHead">
+                        <!-- Gerado dinamicamente -->
+                    </thead>
                     <tbody id="tableBody"></tbody>
                 </table>
             </div>
@@ -219,11 +223,8 @@
                 </div>
                 <div>
                     <div class="form-label">Colunas a incluir:</div>
-                    <div class="multiselect">
-                        <label class="checkbox-item"><input type="checkbox" id="colCompOrig" checked onchange="updatePreview()"><span>Competencia_Original</span></label>
-                        <label class="checkbox-item"><input type="checkbox" id="colData" checked onchange="updatePreview()"><span>Data</span></label>
-                        <label class="checkbox-item"><input type="checkbox" id="colAnoMes" onchange="updatePreview()"><span>Ano_Mes</span></label>
-                        <label class="checkbox-item"><input type="checkbox" id="colSalario" checked onchange="updatePreview()"><span>Salario_Contribuicao</span></label>
+                    <div class="multiselect" id="columnsContainer">
+                        <!-- Gerado dinamicamente -->
                     </div>
                 </div>
             </div>
@@ -238,45 +239,14 @@
                 <span>🔄</span><span>Processar outro PDF</span>
             </button>
         </div>
-
-        <!-- INSTRUCTIONS -->
-        <div class="card">
-            <div class="expander">
-                <div class="expander-header" onclick="toggleExpander(this)">
-                    <span class="expander-icon">▼</span><span>ℹ️ Instruções e Compatibilidade</span>
-                </div>
-                <div class="expander-content">
-                    <h3 style="margin-bottom:10px">Formatos de Competência Disponíveis:</h3>
-                    <ul style="margin: 10px 0 18px 20px; line-height: 1.8;">
-                        <li><span class="badge badge-blue">Data Completa</span> Exporta como <code>01/MM/AAAA</code>. <strong>Recomendado para fórmulas e cálculos de data no Excel.</strong></li>
-                        <li><span class="badge badge-green">Ano-Mês</span> Formato <code>"AAAA-MM"</code> - Padrão internacional para agrupar.</li>
-                        <li><span class="badge badge-purple">Original</span> Formato <code>"Mmm/AA"</code> - Como aparece no PDF.</li>
-                    </ul>
-                    <h3 style="margin-bottom:10px">Compatibilidade:</h3>
-                    <p style="line-height: 1.7; color: #4b5563;">
-                        Este leitor funciona com PDFs de RMI no formato padrão da Justiça Federal, 
-                        onde cada linha contém: <strong>Competência (Mmm/AA) + Salário-de-Contribuição</strong> 
-                        em colunas. Se o PDF não for reconhecido, use o diagnóstico técnico para ver 
-                        como o texto está sendo extraído.
-                    </p>
-                    <div class="code-block">
-// Exemplo de uso no Excel:
-=DIAS360(A2;A3)           // Calcula dias entre competências
-=DATADIF(A2;HOJE();"Y")  // Calcula anos de contribuição
-=MÊS(A2)                 // Extrai o mês da competência
-=SOMASE(B:B;">1000")     // Soma salários acima de 1000
-=MÉDIA(B2:B100)          // Média dos salários
-                    </div>
-                </div>
-            </div>
-        </div>
     </div>
 
     <script>
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
         let extractedData = [];
-        let allLines = []; // Linhas brutas extraídas do PDF (para debug)
+        let allLines = []; 
+        let maxCols = 0; // Guardará o número máximo de colunas numéricas encontradas
 
         const mesesPtEn = {
             'jan': 'Jan', 'fev': 'Feb', 'mar': 'Mar', 'abr': 'Apr', 'mai': 'May', 'jun': 'Jun',
@@ -334,6 +304,7 @@
 
             extractedData = [];
             allLines = [];
+            maxCols = 0;
 
             try {
                 const arrayBuffer = await file.arrayBuffer();
@@ -351,12 +322,9 @@
                     const textContent = await page.getTextContent();
                     const items = textContent.items;
 
-                    // === ESTRATÉGIA 1: Agrupar por Y com junção de X adjacentes ===
-                    // Isso reconstrói números quebrados como "1" + ".031,87" -> "1.031,87"
-
-                    // Primeiro, agrupar por linha (Y)
+                    // Agrupar por Y com junção de X adjacentes
                     const lineMap = {};
-                    const Y_TOLERANCE = 3; // Tolerância para considerar mesma linha
+                    const Y_TOLERANCE = 3;
 
                     for (const item of items) {
                         const x = item.transform[4];
@@ -367,14 +335,11 @@
                         lineMap[yKey].push({ text: item.str, x: x, width: item.width || 0 });
                     }
 
-                    // Ordenar linhas de cima para baixo (Y decrescente)
                     const sortedY = Object.keys(lineMap).map(Number).sort((a, b) => b - a);
 
                     for (const y of sortedY) {
-                        // Ordenar da esquerda para direita
                         lineMap[y].sort((a, b) => a.x - b.x);
 
-                        // Juntar textos adjacentes (gap < 8 unidades)
                         let lineParts = [];
                         let currentPart = lineMap[y][0].text;
                         let currentEndX = lineMap[y][0].x + (lineMap[y][0].width || 0);
@@ -383,8 +348,6 @@
                             const item = lineMap[y][j];
                             const gap = item.x - currentEndX;
 
-                            // Se o gap for pequeno, junta (mesmo número quebrado)
-                            // Se for grande, adiciona espaço
                             if (gap < 8) {
                                 currentPart += item.text;
                             } else {
@@ -404,26 +367,17 @@
 
                 document.getElementById('progressFill').style.width = '100%';
 
-                // Mostrar primeiras linhas no debug
                 logDebug(`=== PRIMEIRAS 30 LINHAS RECONSTRUÍDAS ===\n`);
                 allLines.slice(0, 30).forEach((l, idx) => logDebug(`${idx}: ${l}`));
                 logDebug(`\nTotal de linhas: ${allLines.length}\n`);
 
                 document.getElementById('toggleDebug').classList.remove('hidden');
 
-                // === EXTRAÇÃO DE DADOS ===
-                // Tentar múltiplos padrões de regex
+                // Regex para identificar início com Competência (ex: nov/89)
+                const linePattern = /^([a-z]{3}\/\d{2,4})\s+(.*)$/i;
+                // Regex para capturar TODOS os números da linha (ex: 102,37 ou 0,3267691039)
+                const numPattern = /-?\d{1,3}(?:\.\d{3})*(?:,\d+)?/g;
 
-                const patterns = [
-                    // Padrão 1: Competência seguida de número com vírgula decimal (formato BR)
-                    // Captura o PRIMEIRO valor monetário após a competência (que é o Salário-de-Contribuição)
-                    /^([a-z]{3}\/\d{2,4})\s+(\d{1,3}(?:\.\d{3})*,\d{2})/i,
-
-                    // Padrão 2: Mais flexível, permite espaços extras
-                    /^([a-z]{3}\/\d{2,4})\s+([\d.]+,\d{2})/i,
-                ];
-
-                // Linhas a ignorar (cabeçalhos, resumos)
                 const skipPatterns = [
                     /total de contrib/i, /média dos/i, /salário-de-benefício/i,
                     /coeficiente de cálculo/i, /fator previdenciário/i,
@@ -440,29 +394,29 @@
                 for (const line of allLines) {
                     const lower = line.toLowerCase();
 
-                    // Pular linhas de cabeçalho/resumo
                     let skip = false;
                     for (const sp of skipPatterns) {
                         if (sp.test(lower)) { skip = true; break; }
                     }
                     if (skip) continue;
 
-                    // Tentar extrair com os padrões
-                    for (const pattern of patterns) {
-                        const match = line.match(pattern);
-                        if (match) {
-                            const competencia = match[1];
-                            const salarioStr = match[2];
+                    const match = line.match(linePattern);
+                    if (match) {
+                        const competencia = match[1];
+                        const restoDaLinha = match[2];
 
-                            // Validar: deve ter mais números na linha (evita falsos positivos)
-                            const numerosNaLinha = (line.match(/\d+[,.]\d+/g) || []).length;
-                            if (numerosNaLinha < 2) continue; // Precisa de pelo menos 2 números (salário + outro valor)
+                        const numMatches = restoDaLinha.match(numPattern);
+                        
+                        if (numMatches && numMatches.length > 0) {
+                            // Converte as strings capturadas para float
+                            const valoresLinha = numMatches.map(val => {
+                                return parseFloat(val.replace(/\./g, '').replace(',', '.'));
+                            });
 
-                            // Converter salário
-                            const salarioFloat = parseFloat(salarioStr.replace(/\./g, '').replace(',', '.'));
-                            if (isNaN(salarioFloat) || salarioFloat <= 0) continue;
+                            if (valoresLinha.length > maxCols) {
+                                maxCols = valoresLinha.length;
+                            }
 
-                            // Converter data
                             const dataComp = converterCompetencia(competencia);
 
                             extractedData.push({
@@ -470,20 +424,19 @@
                                 Data: dataComp,
                                 Data_Str: dataComp ? dataComp.toLocaleDateString('pt-BR', {day: '2-digit', month: '2-digit', year: 'numeric'}) : '-',
                                 Ano_Mes: dataComp ? dataComp.toISOString().slice(0, 7) : competencia,
-                                Salario_Contribuicao: salarioFloat
+                                Valores: valoresLinha
                             });
-                            break; // Pular para próxima linha após match
                         }
                     }
                 }
 
                 logDebug(`Registros extraídos: ${extractedData.length}\n`);
+                logDebug(`Máximo de colunas numéricas encontradas: ${maxCols}\n`);
 
                 document.getElementById('progressBar').classList.add('hidden');
                 document.getElementById('statusText').classList.add('hidden');
                 document.getElementById('progressFill').style.width = '0%';
 
-                // Ordenar por data
                 extractedData.sort((a, b) => {
                     if (a.Data && b.Data) return a.Data - b.Data;
                     return 0;
@@ -492,21 +445,19 @@
                 if (extractedData.length === 0) {
                     document.getElementById('warningAlert').classList.remove('hidden');
                     logDebug('\n⚠️ Nenhum dado extraído. Verifique as linhas reconstruídas acima.');
-                    logDebug('\nDica: O PDF pode estar em formato de imagem (não texto).');
                     return;
                 }
 
-                // Sucesso!
+                // Sucesso
                 document.getElementById('recordCount').textContent = extractedData.length;
                 document.getElementById('successAlert').classList.remove('hidden');
-
-                const maxSal = Math.max(...extractedData.map(d => d.Salario_Contribuicao));
 
                 document.getElementById('totalRecords').textContent = extractedData.length;
                 document.getElementById('periodStart').textContent = extractedData[0].Competencia_Original;
                 document.getElementById('periodEnd').textContent = extractedData[extractedData.length - 1].Competencia_Original;
-                document.getElementById('maxSalary').textContent = 'R$ ' + maxSal.toFixed(2).replace('.', ',');
+                document.getElementById('maxColsDetect').textContent = maxCols;
 
+                buildDynamicUI();
                 renderTable(extractedData);
 
                 document.getElementById('previewCard').classList.remove('hidden');
@@ -526,30 +477,65 @@
             }
         }
 
+        function buildDynamicUI() {
+            // Construir cabeçalhos da tabela
+            const tableHead = document.getElementById('tableHead');
+            let headHTML = '<tr><th>Competência Original</th><th>Data</th><th>Ano-Mês</th>';
+            for (let i = 0; i < maxCols; i++) {
+                headHTML += `<th style="text-align:right">Coluna ${i + 1}</th>`;
+            }
+            headHTML += '</tr>';
+            tableHead.innerHTML = headHTML;
+
+            // Construir checkboxes de exportação
+            const colsContainer = document.getElementById('columnsContainer');
+            let checksHTML = `
+                <label class="checkbox-item"><input type="checkbox" id="colCompOrig" checked onchange="updatePreview()"><span>Competencia_Original</span></label>
+                <label class="checkbox-item"><input type="checkbox" id="colData" checked onchange="updatePreview()"><span>Data</span></label>
+                <label class="checkbox-item"><input type="checkbox" id="colAnoMes" onchange="updatePreview()"><span>Ano_Mes</span></label>
+            `;
+            
+            for (let i = 0; i < maxCols; i++) {
+                checksHTML += `<label class="checkbox-item"><input type="checkbox" id="colVal${i}" checked onchange="updatePreview()"><span>Coluna ${i + 1}</span></label>`;
+            }
+            colsContainer.innerHTML = checksHTML;
+        }
+
         function renderTable(rows) {
             const tbody = document.getElementById('tableBody');
             tbody.innerHTML = '';
             rows.forEach(row => {
                 const tr = document.createElement('tr');
-                const dataStr = row.Data ? row.Data.toLocaleDateString('pt-BR', {day: '2-digit', month: '2-digit', year: 'numeric'}) : '-';
-                tr.innerHTML = `
+                let rowHTML = `
                     <td>${row.Competencia_Original}</td>
-                    <td>${dataStr}</td>
+                    <td>${row.Data_Str}</td>
                     <td>${row.Ano_Mes}</td>
-                    <td class="num">R$ ${row.Salario_Contribuicao.toFixed(2).replace('.', ',')}</td>
                 `;
+                
+                for (let i = 0; i < maxCols; i++) {
+                    let val = row.Valores[i];
+                    let valStr = val !== undefined ? val.toFixed(2).replace('.', ',') : '-';
+                    // Verificação adicional para números muito extensos ou com muitas casas decimais se não for moeda exata
+                    if (val !== undefined && val.toString().split('.')[1]?.length > 2) {
+                        valStr = val.toString().replace('.', ','); 
+                    }
+                    rowHTML += `<td class="num">${valStr !== '-' ? valStr : '-'}</td>`;
+                }
+                
+                tr.innerHTML = rowHTML;
                 tbody.appendChild(tr);
             });
         }
 
         function filterTable() {
             const term = document.getElementById('searchBox').value.toLowerCase();
-            const filtered = extractedData.filter(row => 
-                row.Competencia_Original.toLowerCase().includes(term) ||
-                (row.Data && row.Data.toLocaleDateString('pt-BR').includes(term)) ||
-                row.Ano_Mes.includes(term) ||
-                row.Salario_Contribuicao.toString().includes(term)
-            );
+            const filtered = extractedData.filter(row => {
+                const termInValues = row.Valores.some(v => v.toString().includes(term));
+                return row.Competencia_Original.toLowerCase().includes(term) ||
+                       (row.Data && row.Data.toLocaleDateString('pt-BR').includes(term)) ||
+                       row.Ano_Mes.includes(term) ||
+                       termInValues;
+            });
             renderTable(filtered);
         }
 
@@ -568,6 +554,7 @@
         function resetAll() {
             extractedData = [];
             allLines = [];
+            maxCols = 0;
             document.getElementById('previewCard').classList.add('hidden');
             document.getElementById('exportCard').classList.add('hidden');
             document.getElementById('debugBox').textContent = '';
@@ -587,17 +574,22 @@
 
         function getExportData() {
             const format = document.querySelector('input[name="format"]:checked').value;
-            const cols = [];
-            if (document.getElementById('colCompOrig').checked) cols.push('Competencia_Original');
-            if (document.getElementById('colData').checked) cols.push('Data');
-            if (document.getElementById('colAnoMes').checked) cols.push('Ano_Mes');
-            if (document.getElementById('colSalario').checked) cols.push('Salario_Contribuicao');
-            if (cols.length === 0) cols.push('Salario_Contribuicao');
+            const colsBase = [];
+            if (document.getElementById('colCompOrig').checked) colsBase.push('Competencia_Original');
+            if (document.getElementById('colData').checked) colsBase.push('Data');
+            if (document.getElementById('colAnoMes').checked) colsBase.push('Ano_Mes');
+
+            const valCols = [];
+            for (let i = 0; i < maxCols; i++) {
+                if (document.getElementById(`colVal${i}`).checked) {
+                    valCols.push(i);
+                }
+            }
 
             return extractedData.map(row => {
                 const obj = {};
-                if (cols.includes('Competencia_Original')) obj.Competencia_Original = row.Competencia_Original;
-                if (cols.includes('Data')) {
+                if (colsBase.includes('Competencia_Original')) obj.Competencia_Original = row.Competencia_Original;
+                if (colsBase.includes('Data')) {
                     if (format === 'full' && row.Data) {
                         obj.Competencia = row.Data;
                     } else if (format === 'yearmonth') {
@@ -606,8 +598,12 @@
                         obj.Competencia = row.Competencia_Original;
                     }
                 }
-                if (cols.includes('Ano_Mes') && format !== 'yearmonth') obj.Ano_Mes = row.Ano_Mes;
-                if (cols.includes('Salario_Contribuicao')) obj.Salario_Contribuicao = row.Salario_Contribuicao;
+                if (colsBase.includes('Ano_Mes') && format !== 'yearmonth') obj.Ano_Mes = row.Ano_Mes;
+                
+                valCols.forEach(colIndex => {
+                    obj[`Coluna_${colIndex + 1}`] = row.Valores[colIndex] !== undefined ? row.Valores[colIndex] : null;
+                });
+
                 return obj;
             });
         }
@@ -623,8 +619,10 @@
                 let maxLen = key.length;
                 data.forEach(row => {
                     const val = row[key];
-                    const str = val instanceof Date ? val.toLocaleDateString('pt-BR') : String(val);
-                    maxLen = Math.max(maxLen, str.length);
+                    if (val !== null && val !== undefined) {
+                        const str = val instanceof Date ? val.toLocaleDateString('pt-BR') : String(val);
+                        maxLen = Math.max(maxLen, str.length);
+                    }
                 });
                 colWidths.push({ wch: maxLen + 2 });
             });
@@ -640,16 +638,16 @@
                         cell.t = 'd';
                         cell.z = 'dd/mm/yyyy';
                     }
-                    if (header === 'Salario_Contribuicao') {
+                    if (header && header.startsWith('Coluna_') && typeof cell.v === 'number') {
                         cell.t = 'n';
-                        cell.z = '#,##0.00';
+                        cell.z = '#,##0.00'; 
                     }
                 }
             }
 
             const wb = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(wb, ws, 'Salarios_Contribuicao');
-            XLSX.writeFile(wb, 'salarios_contribuicao.xlsx');
+            XLSX.utils.book_append_sheet(wb, ws, 'Dados_Extraidos');
+            XLSX.writeFile(wb, 'dados_rmi.xlsx');
         }
 
         function exportCSV() {
@@ -660,6 +658,7 @@
             data.forEach(row => {
                 const vals = headers.map(h => {
                     const v = row[h];
+                    if (v === null || v === undefined) return '';
                     if (v instanceof Date) return v.toLocaleDateString('pt-BR');
                     return String(v).replace('.', ',');
                 });
@@ -668,13 +667,8 @@
             const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
-            link.download = 'salarios_contribuicao.csv';
+            link.download = 'dados_rmi.csv';
             link.click();
-        }
-
-        function toggleExpander(header) {
-            header.classList.toggle('open');
-            header.nextElementSibling.classList.toggle('show');
         }
     </script>
 </body>
