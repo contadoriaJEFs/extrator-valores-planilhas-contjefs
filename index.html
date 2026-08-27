@@ -174,7 +174,7 @@
         </div>
         <div class="alert alert-warning hidden" id="warningAlert">
             <span>⚠️</span>
-            <span>Nenhum dado foi extraído. O PDF pode estar em formato diferente. Veja o diagnóstico técnico abaixo.</span>
+            <span id="warningText">Nenhum dado foi extraído. O PDF pode estar em formato diferente. Veja o diagnóstico técnico abaixo.</span>
         </div>
 
         <!-- PREVIEW -->
@@ -245,7 +245,8 @@
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
         let extractedData = [];
-        let allLines = []; 
+        let allLines = [];
+        let allItems = []; // Itens brutos do PDF, usados para leitura robusta por competência
         let maxCols = 0; // Guardará o número máximo de colunas numéricas encontradas
 
         const mesesPtEn = {
@@ -326,6 +327,8 @@
 
             extractedData = [];
             allLines = [];
+            allRows = [];
+            allItems = [];
             maxCols = 0;
 
             try {
@@ -344,30 +347,60 @@
                     const textContent = await page.getTextContent();
                     const items = textContent.items;
 
-                    // Agrupar por Y com junção de X adjacentes
-                    const lineMap = {};
-                    const Y_TOLERANCE = 3;
+                    // Guarda os itens brutos com a página. A leitura final usa
+                    // esses itens diretamente, evitando perder linhas especiais
+                    // quando o PDF.js separa visualmente a competência dos valores.
+                    items.forEach(item => {
+                        if (item.str && String(item.str).trim()) {
+                            allItems.push({
+                                text: String(item.str),
+                                x: item.transform[4],
+                                y: item.transform[5],
+                                width: item.width || 0,
+                                page: i
+                            });
+                        }
+                    });
 
-                    for (const item of items) {
-                        const x = item.transform[4];
-                        const y = item.transform[5];
-                        const yKey = Math.round(y / Y_TOLERANCE) * Y_TOLERANCE;
+                    // Agrupamento por proximidade vertical.
+                    // Algumas linhas destacadas do PDF têm a competência em Y
+                    // ligeiramente diferente dos números (diferença < 1 ponto).
+                    // O agrupamento por arredondamento podia separar esses itens
+                    // e fazer a competência desaparecer da extração.
+                    const rowGroups = [];
+                    const Y_TOLERANCE = 2.5;
 
-                        if (!lineMap[yKey]) lineMap[yKey] = [];
-                        lineMap[yKey].push({ text: item.str, x: x, width: item.width || 0 });
+                    const sortedItems = [...items]
+                        .map(item => ({
+                            text: item.str,
+                            x: item.transform[4],
+                            y: item.transform[5],
+                            width: item.width || 0
+                        }))
+                        .sort((a, b) => a.y - b.y);
+
+                    for (const item of sortedItems) {
+                        let group = rowGroups[rowGroups.length - 1];
+
+                        if (!group || Math.abs(item.y - group.avgY) > Y_TOLERANCE) {
+                            group = { avgY: item.y, items: [] };
+                            rowGroups.push(group);
+                        }
+
+                        group.items.push(item);
+                        group.avgY = group.items.reduce((sum, it) => sum + it.y, 0) / group.items.length;
                     }
 
-                    const sortedY = Object.keys(lineMap).map(Number).sort((a, b) => b - a);
-
-                    for (const y of sortedY) {
-                        lineMap[y].sort((a, b) => a.x - b.x);
+                    for (const group of rowGroups) {
+                        const rowItems = [...group.items].sort((a, b) => a.x - b.x);
+                        if (!rowItems.length) continue;
 
                         let lineParts = [];
-                        let currentPart = lineMap[y][0].text;
-                        let currentEndX = lineMap[y][0].x + (lineMap[y][0].width || 0);
+                        let currentPart = rowItems[0].text;
+                        let currentEndX = rowItems[0].x + rowItems[0].width;
 
-                        for (let j = 1; j < lineMap[y].length; j++) {
-                            const item = lineMap[y][j];
+                        for (let j = 1; j < rowItems.length; j++) {
+                            const item = rowItems[j];
                             const gap = item.x - currentEndX;
 
                             if (gap < 8) {
@@ -376,13 +409,14 @@
                                 lineParts.push(currentPart);
                                 currentPart = item.text;
                             }
-                            currentEndX = item.x + (item.width || 0);
+                            currentEndX = item.x + item.width;
                         }
                         lineParts.push(currentPart);
 
                         const lineText = lineParts.join(' ').replace(/\s+/g, ' ').trim();
                         if (lineText.length > 0) {
                             allLines.push(lineText);
+                            allRows.push({ text: lineText, items: rowItems });
                         }
                     }
                 }
@@ -395,9 +429,11 @@
 
                 document.getElementById('toggleDebug').classList.remove('hidden');
 
-                // Regex para identificar início com Competência (ex: nov/89)
-                const linePattern = /^([a-z]{3}\/\d{2,4})\s+(.*)$/i;
-                // Regex para capturar TODOS os números da linha (ex: 102,37 ou 0,3267691039)
+                // A extração do PDF pode deslocar/duplicar itens da mesma linha.
+                // Por isso, a competência não precisa estar obrigatoriamente no início.
+                // Ex.: a linha de ago/14 contém textos/números duplicados no PDF.
+                const linePattern = /\b(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\/(\d{2}|\d{4})\b/i;
+                // Captura todos os números da linha (ex.: 102,37 ou 0,3267691039).
                 const numPattern = /-?\d{1,3}(?:\.\d{3})*(?:,\d+)?/g;
 
                 const skipPatterns = [
@@ -413,44 +449,131 @@
                     /salário de contribuição considerado/i,
                 ];
 
-                for (const line of allLines) {
-                    const lower = line.toLowerCase();
+                // Limites horizontais das seis colunas numéricas da tabela.
+                // A competência ocupa a primeira coluna (x < 105). Os valores
+                // são lidos pela posição, e não pela quantidade de números na linha.
+                // Isso evita que linhas destacadas no PDF, que possuem textos
+                // duplicados, desloquem as colunas.
+                const columnRanges = [
+                    [105, 205], // Salário-de-Contribuição
+                    [205, 290], // Teto dos Salários-de-Contribuição
+                    [290, 350], // Sal. Contr. Teto
+                    [350, 430], // Coeficiente de Atualização
+                    [430, 525], // S. Contribuição Corrigido
+                    [525, 620]  // Salário de Contribuição Considerado
+                ];
 
-                    let skip = false;
-                    for (const sp of skipPatterns) {
-                        if (sp.test(lower)) { skip = true; break; }
+                function numeroDeItem(text) {
+                    const t = String(text || '').replace(/\s+/g, '');
+                    if (!/[0-9]/.test(t)) return null;
+                    // O item completo com vírgula decimal é preferido aos
+                    // fragmentos que o PDF.js também pode fornecer.
+                    if (!/^-?\d{1,3}(?:\.\d{3})*(?:,\d+)?$/.test(t)) return null;
+                    return parseFloat(t.replace(/\./g, '').replace(',', '.'));
+                }
+
+                function extrairValorColuna(items, xMin, xMax) {
+                    const candidatos = [];
+                    for (const item of items) {
+                        const x = item.x;
+                        const xFim = x + (item.width || 0);
+                        const centro = (x + xFim) / 2;
+                        if (centro < xMin || centro >= xMax) continue;
+
+                        const valor = numeroDeItem(item.text);
+                        if (valor !== null) {
+                            const texto = String(item.text).replace(/\s+/g, '');
+                            candidatos.push({ valor, texto, tamanho: texto.length });
+                        }
                     }
-                    if (skip) continue;
 
-                    const match = line.match(linePattern);
-                    if (match) {
-                        const competencia = match[1];
-                        const restoDaLinha = match[2];
+                    // Primeiro: um item que já contenha o número completo.
+                    // Em linhas como ago/99 e mai/03 existem cópias do mesmo
+                    // valor; a cópia completa é escolhida apenas uma vez.
+                    if (candidatos.length) {
+                        candidatos.sort((a, b) => b.tamanho - a.tamanho);
+                        return candidatos[0].valor;
+                    }
 
-                        const numMatches = restoDaLinha.match(numPattern);
-                        
-                        if (numMatches && numMatches.length > 0) {
-                            // Converte as strings capturadas para float
-                            const valoresLinha = numMatches.map(val => {
-                                return parseFloat(val.replace(/\./g, '').replace(',', '.'));
-                            });
+                    // Fallback para PDFs que fragmentam o número em vários itens.
+                    const partes = items
+                        .filter(item => {
+                            const centro = item.x + (item.width || 0) / 2;
+                            return centro >= xMin && centro < xMax && /[0-9]/.test(item.text);
+                        })
+                        .sort((a, b) => a.x - b.x);
 
-                            if (valoresLinha.length > maxCols) {
-                                maxCols = valoresLinha.length;
-                            }
+                    if (!partes.length) return null;
+                    const concatenado = partes.map(i => String(i.text).replace(/\s+/g, '')).join('');
+                    const valorFallback = numeroDeItem(concatenado);
+                    return valorFallback;
+                }
 
-                            const dataComp = converterCompetencia(competencia);
+                // =============================================================
+                // EXTRAÇÃO FINAL: usa o item da competência como âncora.
+                // Isso resolve as linhas especiais em que o PDF contém textos
+                // duplicados (ago/99, mai/03, fev/07, nov/10 e ago/14).
+                // =============================================================
+                const competenciaItems = allItems.filter(item =>
+                    linePattern.test(item.text)
+                );
 
-                            extractedData.push({
-                                Competencia_Original: competencia.toLowerCase().replace(/\b\w/g, l => l.toUpperCase()),
-                                Data: dataComp,
-                                Data_Str: dataComp ? formatarDataCompetencia(dataComp) : '-',
-                                Ano_Mes: dataComp ? dataComp.toISOString().slice(0, 7) : competencia,
-                                Valores: valoresLinha
-                            });
+                function extrairValoresAoRedorDaCompetencia(compItem) {
+                    const Y_TOLERANCE = 3.5;
+                    const rowItems = allItems.filter(item =>
+                        item.page === compItem.page &&
+                        Math.abs(item.y - compItem.y) <= Y_TOLERANCE &&
+                        item.x > 80
+                    );
+
+                    return columnRanges.map(([xMin, xMax]) =>
+                        extrairValorColuna(rowItems, xMin, xMax)
+                    );
+                }
+
+                for (const compItem of competenciaItems) {
+                    const match = compItem.text.match(linePattern);
+                    if (!match) continue;
+
+                    const competencia = `${match[1]}/${match[2]}`;
+                    const dataComp = converterCompetencia(competencia);
+                    if (!dataComp) continue;
+
+                    const valoresLinha = extrairValoresAoRedorDaCompetencia(compItem);
+
+                    if (!valoresLinha.some(v => v !== null)) continue;
+
+                    extractedData.push({
+                        Competencia_Original: competencia.toLowerCase().replace(/\b\w/g, l => l.toUpperCase()),
+                        Data: dataComp,
+                        Data_Str: formatarDataCompetencia(dataComp),
+                        Ano_Mes: `${dataComp.getFullYear()}-${String(dataComp.getMonth() + 1).padStart(2, '0')}`,
+                        Valores: valoresLinha
+                    });
+
+                    maxCols = Math.max(maxCols, valoresLinha.length);
+                }
+
+                // O PDF pode conter a competência repetida como elemento de texto
+                // (ex.: as linhas destacadas). Consolida por competência sem perder
+                // valores: quando uma cópia tiver uma coluna preenchida e a outra
+                // não, aproveita o valor disponível.
+                const mapaCompetencias = new Map();
+                for (const row of extractedData) {
+                    const chave = row.Ano_Mes;
+                    if (!mapaCompetencias.has(chave)) {
+                        mapaCompetencias.set(chave, row);
+                        continue;
+                    }
+
+                    const existente = mapaCompetencias.get(chave);
+                    for (let i = 0; i < Math.max(existente.Valores.length, row.Valores.length); i++) {
+                        if (existente.Valores[i] === null && row.Valores[i] !== null) {
+                            existente.Valores[i] = row.Valores[i];
                         }
                     }
                 }
+                extractedData = Array.from(mapaCompetencias.values());
 
                 logDebug(`Registros extraídos: ${extractedData.length}\n`);
                 logDebug(`Máximo de colunas numéricas encontradas: ${maxCols}\n`);
@@ -464,6 +587,34 @@
                     return 0;
                 });
 
+                // Verifica se existe alguma competência ausente entre a primeira
+                // e a última competência efetivamente encontradas. O sistema
+                // apenas alerta: nunca inventa uma competência ou um valor.
+                const competenciasAusentes = [];
+                for (let i = 1; i < extractedData.length; i++) {
+                    const anterior = extractedData[i - 1].Data;
+                    const atual = extractedData[i].Data;
+
+                    if (!(anterior instanceof Date) || !(atual instanceof Date)) continue;
+
+                    const esperado = new Date(
+                        anterior.getFullYear(),
+                        anterior.getMonth() + 1,
+                        1
+                    );
+
+                    while (esperado < atual) {
+                        competenciasAusentes.push(formatarDataCompetencia(esperado));
+                        esperado.setMonth(esperado.getMonth() + 1);
+                    }
+                }
+
+                if (competenciasAusentes.length > 0) {
+                    logDebug(
+                        `⚠️ Competências ausentes no conteúdo extraído: ${competenciasAusentes.join(', ')}`
+                    );
+                }
+
                 if (extractedData.length === 0) {
                     document.getElementById('warningAlert').classList.remove('hidden');
                     logDebug('\n⚠️ Nenhum dado extraído. Verifique as linhas reconstruídas acima.');
@@ -472,6 +623,14 @@
 
                 // Sucesso
                 document.getElementById('recordCount').textContent = extractedData.length;
+
+                if (competenciasAusentes.length > 0) {
+                    document.getElementById('warningText').textContent =
+                        `Foram encontradas ${competenciasAusentes.length} competência(s) ausente(s) no PDF: ` +
+                        competenciasAusentes.join(', ') +
+                        `. Nenhuma foi inventada pelo sistema.`;
+                    document.getElementById('warningAlert').classList.remove('hidden');
+                }
                 document.getElementById('successAlert').classList.remove('hidden');
 
                 document.getElementById('totalRecords').textContent = extractedData.length;
@@ -535,13 +694,25 @@
                 `;
                 
                 for (let i = 0; i < maxCols; i++) {
-                    let val = row.Valores[i];
-                    let valStr = val !== undefined ? val.toFixed(2).replace('.', ',') : '-';
-                    // Verificação adicional para números muito extensos ou com muitas casas decimais se não for moeda exata
-                    if (val !== undefined && val.toString().split('.')[1]?.length > 2) {
-                        valStr = val.toString().replace('.', ','); 
+                    const val = row.Valores[i];
+
+                    // Algumas linhas do PDF não possuem valor em determinada
+                    // coluna. Nesses casos o extrator usa null.
+                    // Não podemos chamar toFixed() em null.
+                    let valStr = '-';
+
+                    if (typeof val === 'number' && Number.isFinite(val)) {
+                        valStr = val.toFixed(2).replace('.', ',');
+
+                        // Preserva valores com mais de 2 casas quando o PDF
+                        // realmente trouxe mais precisão (ex.: coeficientes).
+                        const partes = val.toString().split('.');
+                        if (partes[1] && partes[1].length > 2) {
+                            valStr = val.toString().replace('.', ',');
+                        }
                     }
-                    rowHTML += `<td class="num">${valStr !== '-' ? valStr : '-'}</td>`;
+
+                    rowHTML += `<td class="num">${valStr}</td>`;
                 }
                 
                 tr.innerHTML = rowHTML;
@@ -576,6 +747,8 @@
         function resetAll() {
             extractedData = [];
             allLines = [];
+            allRows = [];
+            allItems = [];
             maxCols = 0;
             document.getElementById('previewCard').classList.add('hidden');
             document.getElementById('exportCard').classList.add('hidden');
@@ -657,9 +830,24 @@
                     if (!cell) continue;
                     const header = ws[XLSX.utils.encode_cell({ r: 0, c: C })]?.v;
                     if (header === 'Competencia') {
-                        // A célula precisa permanecer como DATA, não como texto.
-                        if (cell.v instanceof Date && !isNaN(cell.v.getTime())) {
-                            cell.t = 'd';
+                        // Usa o número serial do Excel para que a data fique
+                        // realmente reconhecida como data, sem deslocamento
+                        // de um dia/mês por causa de fuso horário.
+                        const rowIndex = R - 1;
+                        const dataRow = data[rowIndex];
+
+                        if (dataRow && dataRow.Competencia instanceof Date &&
+                            !isNaN(dataRow.Competencia.getTime())) {
+
+                            const d = dataRow.Competencia;
+                            const serial = Date.UTC(
+                                d.getFullYear(),
+                                d.getMonth(),
+                                d.getDate()
+                            ) / 86400000 + 25569;
+
+                            cell.v = serial;
+                            cell.t = 'n';
                             cell.z = 'dd/mm/yyyy';
                         }
                     }
